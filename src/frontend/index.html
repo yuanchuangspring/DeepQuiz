@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeepQuiz - 智能题库生成</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.23/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body class="p-4 bg-base-200 min-h-screen">
+  <div id="app" class="max-w-4xl mx-auto">
+    <!-- 头部 -->
+    <header class="mb-8 text-center">
+      <h1 class="text-4xl font-bold text-primary">DeepQuiz</h1>
+      <p class="text-lg mt-2">AI智能题库生成系统</p>
+    </header>
+
+    <!-- 上传区域 -->
+    <div v-if="!sessionId" class="card bg-base-100 shadow-xl mb-8">
+      <div class="card-body">
+        <h2 class="card-title">第一步：上传教材PDF</h2>
+
+        <div class="form-control">
+          <label class="label">
+            <span class="label-text">选择文件（支持拖拽）</span>
+          </label>
+          <input type="file" 
+                 @change="handleFileSelect" 
+                 accept=".pdf"
+                 class="file-input file-input-bordered w-full" />
+        </div>
+
+        <!-- 参数配置 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">题目数量</span>
+            </label>
+            <input type="number" 
+                   v-model.number="config.numQuestions" 
+                   min="1" max="20"
+                   class="input input-bordered" />
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">难度</span>
+            </label>
+            <select v-model="config.difficulty" class="select select-bordered">
+              <option value="easy">简单</option>
+              <option value="medium">中等</option>
+              <option value="hard">困难</option>
+            </select>
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">题型</span>
+            </label>
+            <select v-model="config.questionType" class="select select-bordered">
+              <option value="multiple_choice">多选题</option>
+              <option value="true_false">判断题</option>
+              <option value="short_answer">简答题</option>
+            </select>
+          </div>
+        </div>
+
+        <button @click="uploadFile" 
+                class="btn btn-primary mt-4"
+                :disabled="isUploading">
+          <span v-if="isUploading" class="loading loading-spinner"></span>
+          {{ isUploading ? '上传中...' : '开始生成题库' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 题目生成区域 -->
+    <div v-else>
+      <div class="flex justify-between items-center mb-6">
+        <button @click="reset" class="btn btn-ghost">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+          </svg>
+          上传新文件
+        </button>
+        <button @click="toggleAnswers" class="btn btn-secondary">
+          {{ showAnswers ? '隐藏答案' : '显示答案' }}
+        </button>
+      </div>
+
+      <!-- 加载状态 -->
+      <div v-if="isGenerating" class="text-center p-8">
+        <span class="loading loading-infinity loading-lg text-primary"></span>
+        <p class="mt-4">AI正在努力生成题目中，请稍候...</p>
+      </div>
+
+      <!-- 题目列表 -->
+      <div v-else class="space-y-4">
+        <div v-for="(q, index) in questions" :key="index" class="card bg-base-100 shadow">
+          <div class="card-body">
+            <h3 class="card-title text-lg">题目 {{ index + 1 }}</h3>
+            <p class="whitespace-pre-wrap">{{ q.question }}</p>
+
+            <!-- 多选题选项 -->
+            <div v-if="q.options" class="grid grid-cols-1 gap-2 mt-2">
+              <div v-for="(opt, optIndex) in q.options" 
+                   :key="optIndex"
+                   class="flex items-center gap-2">
+                <div class="badge badge-lg badge-outline">{{ String.fromCharCode(65 + optIndex) }}</div>
+                <span>{{ opt }}</span>
+              </div>
+            </div>
+
+            <!-- 答案区域 -->
+            <div v-if="showAnswers" class="mt-4 p-4 bg-base-200 rounded-lg">
+              <div class="font-bold text-success">正确答案：</div>
+              <p>{{ q.answer }}</p>
+              <div class="font-bold text-success mt-2">解析：</div>
+              <p>{{ q.explanation || '暂无详细解析' }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 非AI生成代码 属人为添加 START -->
+    <!-- 页脚 -->
+    <footer class="p-5 text-center text-sm text-gray-500">
+        © 2025 DeepQuiz. All rights reserved.<br>
+        Developed by Deepseek-R1 & TheStudent
+    </footer>
+    <!-- 非AI生成代码 属人为添加 END -->
+  </div>
+
+  <script>
+    const { createApp } = Vue;
+
+    const API = "http://127.0.0.1:8000"
+
+    createApp({
+      data() {
+        return {
+          sessionId: null,
+          questions: [],
+          isUploading: false,
+          isGenerating: false,
+          showAnswers: false,
+          config: {
+            numQuestions: 5,
+            difficulty: 'medium',
+            questionType: 'multiple_choice'
+          },
+          selectedFile: null
+        }
+      },
+
+      methods: {
+        async handleFileSelect(e) {
+          this.selectedFile = e.target.files[0];
+        },
+
+        async uploadFile() {
+          if (!this.selectedFile) {
+            alert('请先选择PDF文件');
+            return;
+          }
+
+          this.isUploading = true;
+          const formData = new FormData();
+          formData.append('file', this.selectedFile);
+          formData.append('num_questions', this.config.numQuestions);
+          formData.append('difficulty', this.config.difficulty);
+          formData.append('question_types', this.config.questionType);
+
+          try {
+            const res = await axios.post(API + '/upload/', formData, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
+
+            this.sessionId = res.data.session_id;
+            this.startGenerating();
+          } catch (err) {
+            alert(`上传失败：${err.response?.data?.detail || err.message}`);
+          } finally {
+            this.isUploading = false;
+          }
+        },
+
+        async startGenerating() {
+          this.isGenerating = true;
+          try {
+            // 触发生成
+            await axios.post(API + `/generate/${this.sessionId}`);
+
+            // 获取题目
+            const { data } = await axios.get(API + `/questions/${this.sessionId}`);
+            this.questions = data.data;
+          } catch (err) {
+            alert(`生成失败：${err.response?.data?.detail || err.message}`);
+          } finally {
+            this.isGenerating = false;
+          }
+        },
+
+        toggleAnswers() {
+          this.showAnswers = !this.showAnswers;
+        },
+
+        reset() {
+          this.sessionId = null;
+          this.questions = [];
+          this.selectedFile = null;
+        }
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
