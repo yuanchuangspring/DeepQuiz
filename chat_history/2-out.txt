@@ -1,0 +1,280 @@
+好的，用户已经让我生成了应用架构，现在需要完成后端所有代码的编写。我需要先回顾之前的架构设计，确保代码符合各个模块的功能细分。
+
+首先，后端使用FastAPI，所以需要安装必要的依赖，比如fastapi、uvicorn、python-multipart处理文件上传，PyMuPDF解析PDF，还有requests调用大模型的API。数据库部分可能先用SQLite，方便快速开发，但用户提到可能需要存储会话和题目，所以需要设计模型，用SQLAlchemy ORM来管理。
+
+文件上传部分，需要创建一个端点接收PDF文件，保存到临时目录。然后解析PDF，提取文本。这里要注意处理可能的异常，比如文件损坏或非PDF格式。文本预处理可能需要清理多余的空格和特殊字符。
+
+接下来是生成测试题的逻辑。需要构造Prompt，根据用户提供的参数如题目数量、难度、题型，动态生成对应的提示词。然后调用Deepseek-R1的API，这里需要处理API密钥和可能的错误响应。返回的结果需要解
+析成结构化的数据，比如JSON，并验证是否包含所需的字段，如问题、选项、答案等。
+
+数据库部分，需要定义Session和Question模型，每个会话关联一个上传的文件和配置参数，问题表存储生成的题目和答案。可能需要使用异步数据库操作，但为了简化，暂时使用同步的SQLAlchemy，如果以后有
+高并发需求再改用异步。
+
+业务逻辑层需要将解析后的文本和用户配置传递给大模型，处理生成的题目，保存到数据库，然后返回给前端。这里要注意异步任务的处理，如果生成题目时间较长，可能需要使用Celery进行异步处理，但根据用户的要求，可能先实现同步方式，添加一个提示等待的机制。
+
+安全性方面，需要限制文件类型，检查上传的文件是否是PDF，并且设置合适的文件大小限制。API端点可能需要添加认证，但根据当前需求，可能暂时跳过，后续再完善。
+
+测试部分，需要确保各个端点正常工作，比如上传文件返回正确响应，生成的题目结构正确。可能需要编写单元测试，使用FastAPI的TestClient。
+
+最后，考虑部署，需要生成requirements.txt，包含所有依赖，并给出启动服务器的命令。可能还需要配置CORS中间件，允许前端访问后端API。
+
+现在开始编写代码，首先设置FastAPI应用实例，配置中间件，定义数据库模型，创建路由处理文件上传和生成题目。处理PDF解析，调用大模型API，保存结果到数据库，并返回结构化的题目数据。同时处理可能
+的错误情况，返回合适的HTTP状态码和错误信息。
+
+
+以下是基于FastAPI的**DeepQuiz后端完整代码实现**，包含核心功能模块、数据库集成与大模型交互：
+
+```python
+# 安装依赖：pip install fastapi uvicorn python-multipart pymupdf requests sqlalchemy
+
+import os
+import uuid
+import logging
+from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import fitz  # PyMuPDF
+import requests
+from sqlalchemy import create_engine, Column, String, Integer, JSON, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+# --------------------------
+# 初始化配置
+# --------------------------
+app = FastAPI()
+logger = logging.getLogger("deepquiz")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# 数据库配置
+SQLALCHEMY_DATABASE_URL = "sqlite:///./deepquiz.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# DeepSeek-R1 配置 (需替换为实际API信息)
+DEEPSEEK_API_URL = "YOUR_API_ENDPOINT"
+API_KEY = "YOUR_API_KEY"
+HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+# --------------------------
+# 数据库模型
+# --------------------------
+class QuizSession(Base):
+    __tablename__ = "sessions"
+    id = Column(String(36), primary_key=True)
+    file_path = Column(String(512))
+    config = Column(JSON)  # 存储难度、题目数量等配置
+    content_summary = Column(Text)  # 解析后的文本摘要
+
+class Question(Base):
+    __tablename__ = "questions"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(36))
+    question_data = Column(JSON)  # 存储题目、选项、答案等
+
+Base.metadata.create_all(bind=engine)
+
+# --------------------------
+# Pydantic模型
+# --------------------------
+class QuizConfig(BaseModel):
+    num_questions: int = 5
+    difficulty: str = "medium"  # easy/medium/hard
+    question_types: List[str] = ["multiple_choice"]
+
+class GeneratedQuestion(BaseModel):
+    question: str
+    options: List[str]
+    answer: str
+    explanation: str
+
+# --------------------------
+# 核心功能模块
+# --------------------------
+class PDFProcessor:
+    @staticmethod
+    def extract_text(file_path: str, max_length=3000) -> str:
+        """提取PDF文本并进行清理"""
+        doc = fitz.open(file_path)
+        text = []
+        for page in doc:
+            text.append(page.get_text().strip())
+        
+        full_text = "\n".join(text)
+        # 简单清理：移除多余空行和特殊字符
+        cleaned = "\n".join([line.strip() for line in full_text.splitlines() if line.strip()])
+        return cleaned[:max_length]  # 截断避免超出模型token限制
+
+class LLMClient:
+    @staticmethod
+    def generate_questions(text: str, config: QuizConfig) -> List[GeneratedQuestion]:
+        """调用大模型生成题目"""
+        prompt = f"""
+        请根据以下文本内容生成{config.num_questions}道{config.difficulty}难度的题目：
+        文本内容：{text[:2000]}...（截断）
+        
+        要求：
+        - 题型包含：{','.join(config.question_types)}
+        - 答案需要明确标出正确答案
+        - 使用中文生成
+        """
+        
+        try:
+            response = requests.post(
+                DEEPSEEK_API_URL,
+                headers=HEADERS,
+                json={"prompt": prompt, "max_tokens": 2000}
+            )
+            response.raise_for_status()
+            return LLMClient._parse_response(response.json())
+        except Exception as e:
+            logger.error(f"API调用失败: {str(e)}")
+            raise
+
+    @staticmethod
+    def _parse_response(data: dict) -> List[GeneratedQuestion]:
+        """解析模型返回结果（需根据实际响应格式调整）"""
+        # 示例解析逻辑，实际需要根据模型返回格式调整
+        questions = []
+        raw_questions = data.get("choices", [{}])[0].get("text", "").split("\n\n")
+        
+        for q in raw_questions:
+            if "Question:" in q:
+                parts = q.split("Answer:")
+                if len(parts) == 2:
+                    questions.append(GeneratedQuestion(
+                        question=parts[0].replace("Question:", "").strip(),
+                        options=[x.strip() for x in parts[1].split("\n") if x.strip()],
+                        answer="",  # 需要根据实际格式提取
+                        explanation=""
+                    ))
+        return questions
+
+# --------------------------
+# API端点
+# --------------------------
+@app.post("/upload/")
+async def upload_file(
+    file: UploadFile = File(...),
+    num_questions: int = Form(5),
+    difficulty: str = Form("medium"),
+    question_types: str = Form("multiple_choice")
+):
+    # 文件校验
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(400, "仅支持PDF文件")
+    
+    # 保存文件
+    file_id = str(uuid.uuid4())
+    file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+    
+    # 解析文本
+    try:
+        text_content = PDFProcessor.extract_text(file_path)
+    except Exception as e:
+        raise HTTPException(500, f"PDF解析失败: {str(e)}")
+    
+    # 创建会话记录
+    session = SessionLocal()
+    db_session = QuizSession(
+        id=file_id,
+        file_path=file_path,
+        config={
+            "num_questions": num_questions,
+            "difficulty": difficulty,
+            "question_types": question_types.split(",")
+        },
+        content_summary=text_content[:1000]  # 存储摘要
+    )
+    session.add(db_session)
+    session.commit()
+    
+    return JSONResponse({"session_id": file_id, "content_preview": text_content[:200]})
+
+@app.post("/generate/{session_id}")
+def generate_quiz(session_id: str):
+    # 获取会话信息
+    session = SessionLocal()
+    db_session = session.query(QuizSession).filter_by(id=session_id).first()
+    if not db_session:
+        raise HTTPException(404, "会话不存在")
+    
+    # 生成题目
+    try:
+        config = QuizConfig(**db_session.config)
+        questions = LLMClient.generate_questions(db_session.content_summary, config)
+        
+        # 存储题目
+        for q in questions:
+            session.add(Question(
+                session_id=session_id,
+                question_data=q.dict()
+            ))
+        session.commit()
+        
+        return {"count": len(questions), "questions": [q.dict() for q in questions]}
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(500, f"题目生成失败: {str(e)}")
+
+@app.get("/questions/{session_id}")
+def get_questions(session_id: str):
+    """获取已生成的题目"""
+    session = SessionLocal()
+    questions = session.query(Question).filter_by(session_id=session_id).all()
+    return {
+        "data": [q.question_data for q in questions]
+    }
+
+# --------------------------
+# 运行与中间件
+# --------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+---
+
+### **代码说明**：
+
+1. **文件结构**：
+   - `/uploads`：存储上传的PDF文件
+   - `deepquiz.db`：SQLite数据库文件
+
+2. **核心功能**：
+   - PDF解析：使用PyMuPDF提取文本，并进行基础清理
+   - 大模型交互：封装Prompt生成与结果解析逻辑
+   - 数据库操作：使用SQLAlchemy管理会话和题目数据
+
+3. **API端点**：
+   - `POST /upload/`：接收PDF文件和配置参数
+   - `POST /generate/{session_id}`：触发题目生成
+   - `GET /questions/{session_id}`：获取生成的题目
+
+4. **使用方式**：
+```bash
+# 启动服务
+uvicorn main:app --reload
+
+# 测试接口
+curl -X POST -F "file=@/path/to/file.pdf" -F "num_questions=5" http://localhost:8000/upload/
+```
+
+---
+
+### **待完善部分**（根据需求扩展）：
+1. 异步任务处理（使用Celery）
+2. 详细的错误处理与日志记录
+3. 用户认证系统
+4. 题目缓存机制
+5. 更健壮的Prompt工程
+6. 答案验证逻辑
+
+建议在实际部署时添加API限流、请求验证等安全措施。
