@@ -4,7 +4,21 @@
 
 ### 应用界面
 
+![](figures/home.png)
+![](figures/loading.png)
+![](figures/example.png)
+![](figures/example_answer.jpg)
+
 ### 部署教程
 
-- 后端部署
-  首先安装所需库
+#### 后端部署
+
+- 安装所需库
+  ```python
+  pip install
+  ```
+- 启动
+  ```python
+  
+  ```
+    
