@@ -12,13 +12,19 @@
 ### 部署教程
 
 #### 后端部署
+```bash
+# 安装所需库
+pip install fastapi uvicorn python-multipart pymupdf requests sqlalchemy
 
-- 安装所需库
-  ```python
-  pip install
-  ```
-- 启动
-  ```python
-  
-  ```
-    
+# 启动
+uvicorn main:app --reload
+
+# 测试
+curl -X POST -F "file=@/path/to/file.pdf" -F
+```
+
+#### 前端部署
+直接访问src/frontend/index.html即可
+
+### 开发细节
+开发过程及技术细节详见：https://mp.weixin.qq.com/s/MfRcGOHIdj-ZckKGNgk7-Q
