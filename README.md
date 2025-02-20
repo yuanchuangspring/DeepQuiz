@@ -35,7 +35,3 @@ curl -X POST -F "file=@/path/to/file.pdf" -F
 本应用几乎所有代码均由deepseek-R1模型编写，其中人为改动的部分均有注释标注，本应用开发目的意在测评R1模型的编程开发能力。
 
 本仓库所有权和最终解释权归属于北京邮电大学黎享卓越科创工作室-TheStudent
-
-### Star History
-
-![Star History Chart](https://api.star-history.com/svg?repos=yuanchuangspring/DeepQuiz&type=Date)
